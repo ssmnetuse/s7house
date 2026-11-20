@@ -1,0 +1,198 @@
+// =====================================================================
+// SmartHome_Modbus.scl  -  S7-1200 als Modbus-TCP-Client fuer das Smart-Farm-Kit
+//
+// ESP32 (Modbus-TCP-Server): 192.168.200.200, Port 502
+//   Lesen  : 10 Holding-Register ab 40001 (Sensorwerte)
+//   Schreiben: 6 Holding-Register ab 40011 (Befehle + SPS-Heartbeat)
+//
+// Einbinden in TIA Portal:
+//   1. Projektbaum -> Externe Quellendateien (External source files) -> Neue externe Datei
+//      hinzufuegen -> diese .scl waehlen
+//   2. Rechtsklick auf die Datei -> "Bausteine aus Quelle generieren"
+//   3. FB_SmartHome in OB1 (Main) aufrufen, Instanz-DB anlegen lassen:
+//        "FB_SmartHome_DB"(Enable := TRUE);
+//   4. Uebersetzen, laden, Befehle im Datenbaustein "SmartHome_DB" ueber eine
+//      Beobachtungstabelle (Watch table) setzen: Cmd_LED, Cmd_Fan, Cmd_Pump, ...
+//
+// Wichtig:
+//  - InterfaceId unten ("Local~PROFINET_interface_1"): falls der Compiler die
+//    Konstante nicht findet, den Wert 64 eintragen (HW-ID der PROFINET-Schnittstelle,
+//    steht in den Systemkonstanten der CPU).
+//  - Der Baustein ist NICHT getestet. Fehlermeldungen des Compilers bitte melden.
+// =====================================================================
+
+DATA_BLOCK "SmartHome_DB"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+   STRUCT
+      Conn : TCON_IP_v4;                // Verbindungsparameter fuer MB_CLIENT
+      RxRegs : Array[0..9] of Word;     // gelesen: Register 0..9 vom ESP32
+      TxRegs : Array[0..5] of Word;     // geschrieben: Register 10..15 zum ESP32
+
+      // --- Befehle (von HMI / Web / Watch table setzen) ---
+      Cmd_LED : Bool;
+      Cmd_Fan : Bool;
+      Cmd_Pump : Bool;
+      Cmd_Buzzer : Bool;
+      Cmd_Servo : Int := 180;           // 0..180, 180 = Tuer zu, ca. 100 = offen
+
+      // --- Istwerte (skaliert) ---
+      Temp : Real;                      // Grad C
+      Humidity : Real;                  // % rel. Feuchte
+      Soil : Int;                       // Rohwert 0..4095
+      Light : Int;                      // Rohwert 0..4095
+      Water : Int;                      // Rohwert 0..4095
+      Steam : Int;                      // Rohwert 0..4095
+      EspHeartbeat : Word;              // Zaehler vom ESP32
+
+      // --- Kommunikationsstatus ---
+      CommOk : Bool;
+      CommError : Bool;
+      CommStatus : Word;
+   END_STRUCT;
+BEGIN
+END_DATA_BLOCK
+
+
+FUNCTION_BLOCK "FB_SmartHome"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT
+      Enable : Bool;
+   END_VAR
+
+   VAR
+      mb : MB_CLIENT;
+      state : Int;
+      req : Bool;
+      done : Bool;
+      busy : Bool;
+      err : Bool;
+      stat : Word;
+      hbTimer : TON_TIME;
+      hbCount : UInt;
+   END_VAR
+
+   VAR_TEMP
+      mode : USInt;
+      addr : UDInt;
+      len : UInt;
+      ptr : Variant;
+   END_VAR
+
+BEGIN
+   // ---------- Verbindungsparameter (TCP, aktiv, Server = ESP32) ----------
+   "SmartHome_DB".Conn.InterfaceId := "Local~PROFINET_interface_1";
+   "SmartHome_DB".Conn.ID := 1;
+   "SmartHome_DB".Conn.ConnectionType := 11;
+   "SmartHome_DB".Conn.ActiveEstablished := TRUE;
+   "SmartHome_DB".Conn.RemoteAddress.ADDR[1] := 192;
+   "SmartHome_DB".Conn.RemoteAddress.ADDR[2] := 168;
+   "SmartHome_DB".Conn.RemoteAddress.ADDR[3] := 200;
+   "SmartHome_DB".Conn.RemoteAddress.ADDR[4] := 200;
+   "SmartHome_DB".Conn.RemotePort := 502;
+   "SmartHome_DB".Conn.LocalPort := 0;
+
+   // ---------- SPS-Heartbeat: zaehlt jede Sekunde hoch (Register 15) ----------
+   #hbTimer(IN := NOT #hbTimer.Q, PT := T#1s);
+   IF #hbTimer.Q THEN
+      #hbCount := #hbCount + 1;
+   END_IF;
+
+   // ---------- Befehle in die Sende-Register uebertragen (Register 10..15) ----------
+   "SmartHome_DB".TxRegs[0] := BOOL_TO_WORD("SmartHome_DB".Cmd_LED);
+   "SmartHome_DB".TxRegs[1] := BOOL_TO_WORD("SmartHome_DB".Cmd_Fan);
+   "SmartHome_DB".TxRegs[2] := BOOL_TO_WORD("SmartHome_DB".Cmd_Pump);
+   "SmartHome_DB".TxRegs[3] := BOOL_TO_WORD("SmartHome_DB".Cmd_Buzzer);
+   "SmartHome_DB".TxRegs[4] := INT_TO_WORD(LIMIT(MN := 0, IN := "SmartHome_DB".Cmd_Servo, MX := 180));
+   "SmartHome_DB".TxRegs[5] := UINT_TO_WORD(#hbCount);
+
+   // ---------- Parameter je nach Schritt: Lesen (State 1..3) oder Schreiben (4..6) ----------
+   IF #state <= 3 THEN
+      #mode := 0;                                // Lesen
+      #addr := 40001;
+      #len := 10;
+      #ptr := "SmartHome_DB".RxRegs;
+   ELSE
+      #mode := 1;                                // Schreiben
+      #addr := 40011;
+      #len := 6;
+      #ptr := "SmartHome_DB".TxRegs;
+   END_IF;
+
+   // ---------- Modbus-Aufruf ----------
+   #mb(REQ := #req,
+       DISCONNECT := FALSE,
+       MB_MODE := #mode,
+       MB_DATA_ADDR := #addr,
+       MB_DATA_LEN := #len,
+       MB_DATA_PTR := #ptr,
+       CONNECT := "SmartHome_DB".Conn,
+       DONE => #done,
+       BUSY => #busy,
+       ERROR => #err,
+       STATUS => #stat);
+
+   // ---------- Ablaufsteuerung: lesen, schreiben, lesen, ... ----------
+   IF NOT #Enable THEN
+      #state := 0;
+      #req := FALSE;
+   END_IF;
+
+   CASE #state OF
+      0:   // Ruhe
+         IF #Enable THEN
+            #state := 1;
+         END_IF;
+
+      1:   // Lesen starten
+         #req := TRUE;
+         #state := 2;
+
+      2:   // auf Ende des Lesens warten
+         IF #done OR #err THEN
+            #req := FALSE;
+            #state := 3;
+         END_IF;
+
+      3:   // eine Runde Pause (REQ wieder FALSE)
+         #state := 4;
+
+      4:   // Schreiben starten
+         #req := TRUE;
+         #state := 5;
+
+      5:   // auf Ende des Schreibens warten
+         IF #done OR #err THEN
+            #req := FALSE;
+            #state := 6;
+         END_IF;
+
+      6:   // eine Runde Pause, dann wieder lesen
+         #state := 1;
+
+      ELSE
+         #state := 0;
+   END_CASE;
+
+   // ---------- Kommunikationsstatus ----------
+   IF #done THEN
+      "SmartHome_DB".CommOk := TRUE;
+      "SmartHome_DB".CommError := FALSE;
+   END_IF;
+   IF #err THEN
+      "SmartHome_DB".CommOk := FALSE;
+      "SmartHome_DB".CommError := TRUE;
+      "SmartHome_DB".CommStatus := #stat;
+   END_IF;
+
+   // ---------- Istwerte aus den gelesenen Registern ----------
+   "SmartHome_DB".Temp := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[0])) / 10.0;
+   "SmartHome_DB".Humidity := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[1])) / 10.0;
+   "SmartHome_DB".Soil := WORD_TO_INT("SmartHome_DB".RxRegs[2]);
+   "SmartHome_DB".Light := WORD_TO_INT("SmartHome_DB".RxRegs[3]);
+   "SmartHome_DB".Water := WORD_TO_INT("SmartHome_DB".RxRegs[4]);
+   "SmartHome_DB".Steam := WORD_TO_INT("SmartHome_DB".RxRegs[5]);
+   "SmartHome_DB".EspHeartbeat := "SmartHome_DB".RxRegs[9];
+END_FUNCTION_BLOCK
