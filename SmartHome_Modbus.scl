@@ -4,6 +4,7 @@ VERSION : 0.1
 NON_RETAIN
 STRUCT
     Conn : TCON_IP_v4;
+    Buf : Array[0..9] of Word;
     RxRegs : Array[0..9] of Word;
     TxRegs : Array[0..5] of Word;
     Cmd_LED : Bool;
@@ -50,15 +51,20 @@ VAR
     busy : Bool;
     err : Bool;
     stat : Word;
+    mode : USInt;
+    addr : UDInt;
+    len : UInt;
     hbTimer : TON_TIME;
     hbCount : UInt;
 END_VAR
 BEGIN
+    // Heartbeat zum ESP32 (zaehlt jede Sekunde hoch)
     #hbTimer(IN := NOT #hbTimer.Q, PT := T#1s);
     IF #hbTimer.Q THEN
         #hbCount := #hbCount + 1;
     END_IF;
 
+    // Befehle in Sende-Register
     "SmartHome_DB".TxRegs[0] := BOOL_TO_WORD("SmartHome_DB".Cmd_LED);
     "SmartHome_DB".TxRegs[1] := BOOL_TO_WORD("SmartHome_DB".Cmd_Fan);
     "SmartHome_DB".TxRegs[2] := BOOL_TO_WORD("SmartHome_DB".Cmd_Pump);
@@ -66,19 +72,18 @@ BEGIN
     "SmartHome_DB".TxRegs[4] := INT_TO_WORD(LIMIT(MN := 0, IN := "SmartHome_DB".Cmd_Servo, MX := 180));
     "SmartHome_DB".TxRegs[5] := UINT_TO_WORD(#hbCount);
 
-    IF #state <= 3 THEN
-        #mb(REQ := #req, DISCONNECT := FALSE, MB_MODE := 0,
-            MB_DATA_ADDR := 40001, MB_DATA_LEN := 10,
-            MB_DATA_PTR := "SmartHome_DB".RxRegs,
-            CONNECT := "SmartHome_DB".Conn,
-            DONE => #done, BUSY => #busy, ERROR => #err, STATUS => #stat);
-    ELSE
-        #mb(REQ := #req, DISCONNECT := FALSE, MB_MODE := 1,
-            MB_DATA_ADDR := 40011, MB_DATA_LEN := 6,
-            MB_DATA_PTR := "SmartHome_DB".TxRegs,
-            CONNECT := "SmartHome_DB".Conn,
-            DONE => #done, BUSY => #busy, ERROR => #err, STATUS => #stat);
-    END_IF;
+    // Ein einziger Modbus-Aufruf
+    #mb(REQ := #req,
+        DISCONNECT := FALSE,
+        MB_MODE := #mode,
+        MB_DATA_ADDR := #addr,
+        MB_DATA_LEN := #len,
+        MB_DATA_PTR := "SmartHome_DB".Buf,
+        CONNECT := "SmartHome_DB".Conn,
+        DONE => #done,
+        BUSY => #busy,
+        ERROR => #err,
+        STATUS => #stat);
 
     IF NOT #Enable THEN
         #state := 0;
@@ -86,16 +91,45 @@ BEGIN
     END_IF;
 
     CASE #state OF
-        0: IF #Enable THEN #state := 1; END_IF;
-        1: #req := TRUE;  #state := 2;
-        2: IF #done OR #err THEN #req := FALSE; #state := 3; END_IF;
-        3: #state := 4;
-        4: #req := TRUE;  #state := 5;
-        5: IF #done OR #err THEN #req := FALSE; #state := 6; END_IF;
-        6: #state := 1;
-        ELSE #state := 0;
+        0:
+            IF #Enable THEN #state := 1; END_IF;
+        1:  // Lesen starten: 10 Register ab 40001
+            #mode := USINT#0;
+            #addr := UDINT#40001;
+            #len := UINT#10;
+            #req := TRUE;
+            #state := 2;
+        2:
+            IF #done THEN
+                "SmartHome_DB".RxRegs := "SmartHome_DB".Buf;
+                #req := FALSE;
+                #state := 4;
+            ELSIF #err THEN
+                #req := FALSE;
+                #state := 4;
+            END_IF;
+        4:  // Schreiben starten: 6 Register ab 40011
+            "SmartHome_DB".Buf[0] := "SmartHome_DB".TxRegs[0];
+            "SmartHome_DB".Buf[1] := "SmartHome_DB".TxRegs[1];
+            "SmartHome_DB".Buf[2] := "SmartHome_DB".TxRegs[2];
+            "SmartHome_DB".Buf[3] := "SmartHome_DB".TxRegs[3];
+            "SmartHome_DB".Buf[4] := "SmartHome_DB".TxRegs[4];
+            "SmartHome_DB".Buf[5] := "SmartHome_DB".TxRegs[5];
+            #mode := USINT#1;
+            #addr := UDINT#40011;
+            #len := UINT#6;
+            #req := TRUE;
+            #state := 5;
+        5:
+            IF #done OR #err THEN
+                #req := FALSE;
+                #state := 1;
+            END_IF;
+        ELSE
+            #state := 0;
     END_CASE;
 
+    // Status
     IF #done THEN
         "SmartHome_DB".CommOk := TRUE;
         "SmartHome_DB".CommError := FALSE;
@@ -106,6 +140,7 @@ BEGIN
         "SmartHome_DB".CommStatus := #stat;
     END_IF;
 
+    // Messwerte umrechnen
     "SmartHome_DB".Temp := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[0])) / 10.0;
     "SmartHome_DB".Humidity := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[1])) / 10.0;
     "SmartHome_DB".Soil := WORD_TO_INT("SmartHome_DB".RxRegs[2]);
