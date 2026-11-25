@@ -1,10 +1,8 @@
-// SPS-Heartbeat: zaehlt jede Sekunde hoch (Register 15)
 #hbTimer(IN := NOT #hbTimer.Q, PT := T#1s);
 IF #hbTimer.Q THEN
     #hbCount := #hbCount + 1;
 END_IF;
 
-// Befehle in die Sende-Register (Register 10..15)
 "SmartHome_DB".TxRegs[0] := BOOL_TO_WORD("SmartHome_DB".Cmd_LED);
 "SmartHome_DB".TxRegs[1] := BOOL_TO_WORD("SmartHome_DB".Cmd_Fan);
 "SmartHome_DB".TxRegs[2] := BOOL_TO_WORD("SmartHome_DB".Cmd_Pump);
@@ -12,7 +10,6 @@ END_IF;
 "SmartHome_DB".TxRegs[4] := INT_TO_WORD(LIMIT(MN := 0, IN := "SmartHome_DB".Cmd_Servo, MX := 180));
 "SmartHome_DB".TxRegs[5] := UINT_TO_WORD(#hbCount);
 
-// Modbus-Aufruf: Schritte 1..3 lesen, Schritte 4..6 schreiben
 IF #state <= 3 THEN
     #mb(REQ := #req, DISCONNECT := FALSE, MB_MODE := 0,
         MB_DATA_ADDR := 40001, MB_DATA_LEN := 10,
@@ -27,7 +24,6 @@ ELSE
         DONE => #done, BUSY => #busy, ERROR => #err, STATUS => #stat);
 END_IF;
 
-// Ablaufsteuerung: lesen, schreiben, lesen, ...
 IF NOT #Enable THEN
     #state := 0;
     #req := FALSE;
@@ -44,7 +40,6 @@ CASE #state OF
     ELSE #state := 0;
 END_CASE;
 
-// Kommunikationsstatus
 IF #done THEN
     "SmartHome_DB".CommOk := TRUE;
     "SmartHome_DB".CommError := FALSE;
@@ -55,7 +50,6 @@ IF #err THEN
     "SmartHome_DB".CommStatus := #stat;
 END_IF;
 
-// Istwerte aus den gelesenen Registern
 "SmartHome_DB".Temp := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[0])) / 10.0;
 "SmartHome_DB".Humidity := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[1])) / 10.0;
 "SmartHome_DB".Soil := WORD_TO_INT("SmartHome_DB".RxRegs[2]);
