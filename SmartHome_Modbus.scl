@@ -1,59 +1,116 @@
-#hbTimer(IN := NOT #hbTimer.Q, PT := T#1s);
-IF #hbTimer.Q THEN
-    #hbCount := #hbCount + 1;
-END_IF;
+DATA_BLOCK "SmartHome_DB"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+STRUCT
+    Conn : TCON_IP_v4;
+    RxRegs : Array[0..9] of Word;
+    TxRegs : Array[0..5] of Word;
+    Cmd_LED : Bool;
+    Cmd_Fan : Bool;
+    Cmd_Pump : Bool;
+    Cmd_Buzzer : Bool;
+    Cmd_Servo : Int;
+    Temp : Real;
+    Humidity : Real;
+    Soil : Int;
+    Light : Int;
+    Water : Int;
+    Steam : Int;
+    EspHeartbeat : Word;
+    CommOk : Bool;
+    CommError : Bool;
+    CommStatus : Word;
+END_STRUCT;
+BEGIN
+    Conn.ID := W#16#1;
+    Conn.ConnectionType := B#16#0B;
+    Conn.ActiveEstablished := TRUE;
+    Conn.RemoteAddress.ADDR[1] := B#16#C0;
+    Conn.RemoteAddress.ADDR[2] := B#16#A8;
+    Conn.RemoteAddress.ADDR[3] := B#16#C8;
+    Conn.RemoteAddress.ADDR[4] := B#16#C8;
+    Conn.RemotePort := 502;
+    Conn.LocalPort := 0;
+    Cmd_Servo := 180;
+END_DATA_BLOCK
 
-"SmartHome_DB".TxRegs[0] := BOOL_TO_WORD("SmartHome_DB".Cmd_LED);
-"SmartHome_DB".TxRegs[1] := BOOL_TO_WORD("SmartHome_DB".Cmd_Fan);
-"SmartHome_DB".TxRegs[2] := BOOL_TO_WORD("SmartHome_DB".Cmd_Pump);
-"SmartHome_DB".TxRegs[3] := BOOL_TO_WORD("SmartHome_DB".Cmd_Buzzer);
-"SmartHome_DB".TxRegs[4] := INT_TO_WORD(LIMIT(MN := 0, IN := "SmartHome_DB".Cmd_Servo, MX := 180));
-"SmartHome_DB".TxRegs[5] := UINT_TO_WORD(#hbCount);
 
-IF #state <= 3 THEN
-    #mb(REQ := #req, DISCONNECT := FALSE, MB_MODE := 0,
-        MB_DATA_ADDR := 40001, MB_DATA_LEN := 10,
-        MB_DATA_PTR := "SmartHome_DB".RxRegs,
-        CONNECT := "SmartHome_DB".Conn,
-        DONE => #done, BUSY => #busy, ERROR => #err, STATUS => #stat);
-ELSE
-    #mb(REQ := #req, DISCONNECT := FALSE, MB_MODE := 1,
-        MB_DATA_ADDR := 40011, MB_DATA_LEN := 6,
-        MB_DATA_PTR := "SmartHome_DB".TxRegs,
-        CONNECT := "SmartHome_DB".Conn,
-        DONE => #done, BUSY => #busy, ERROR => #err, STATUS => #stat);
-END_IF;
+FUNCTION_BLOCK "FB_SmartHome"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+VAR_INPUT
+    Enable : Bool;
+END_VAR
+VAR
+    mb : MB_CLIENT;
+    state : Int;
+    req : Bool;
+    done : Bool;
+    busy : Bool;
+    err : Bool;
+    stat : Word;
+    hbTimer : TON_TIME;
+    hbCount : UInt;
+END_VAR
+BEGIN
+    #hbTimer(IN := NOT #hbTimer.Q, PT := T#1s);
+    IF #hbTimer.Q THEN
+        #hbCount := #hbCount + 1;
+    END_IF;
 
-IF NOT #Enable THEN
-    #state := 0;
-    #req := FALSE;
-END_IF;
+    "SmartHome_DB".TxRegs[0] := BOOL_TO_WORD("SmartHome_DB".Cmd_LED);
+    "SmartHome_DB".TxRegs[1] := BOOL_TO_WORD("SmartHome_DB".Cmd_Fan);
+    "SmartHome_DB".TxRegs[2] := BOOL_TO_WORD("SmartHome_DB".Cmd_Pump);
+    "SmartHome_DB".TxRegs[3] := BOOL_TO_WORD("SmartHome_DB".Cmd_Buzzer);
+    "SmartHome_DB".TxRegs[4] := INT_TO_WORD(LIMIT(MN := 0, IN := "SmartHome_DB".Cmd_Servo, MX := 180));
+    "SmartHome_DB".TxRegs[5] := UINT_TO_WORD(#hbCount);
 
-CASE #state OF
-    0: IF #Enable THEN #state := 1; END_IF;
-    1: #req := TRUE;  #state := 2;
-    2: IF #done OR #err THEN #req := FALSE; #state := 3; END_IF;
-    3: #state := 4;
-    4: #req := TRUE;  #state := 5;
-    5: IF #done OR #err THEN #req := FALSE; #state := 6; END_IF;
-    6: #state := 1;
-    ELSE #state := 0;
-END_CASE;
+    IF #state <= 3 THEN
+        #mb(REQ := #req, DISCONNECT := FALSE, MB_MODE := 0,
+            MB_DATA_ADDR := 40001, MB_DATA_LEN := 10,
+            MB_DATA_PTR := "SmartHome_DB".RxRegs,
+            CONNECT := "SmartHome_DB".Conn,
+            DONE => #done, BUSY => #busy, ERROR => #err, STATUS => #stat);
+    ELSE
+        #mb(REQ := #req, DISCONNECT := FALSE, MB_MODE := 1,
+            MB_DATA_ADDR := 40011, MB_DATA_LEN := 6,
+            MB_DATA_PTR := "SmartHome_DB".TxRegs,
+            CONNECT := "SmartHome_DB".Conn,
+            DONE => #done, BUSY => #busy, ERROR => #err, STATUS => #stat);
+    END_IF;
 
-IF #done THEN
-    "SmartHome_DB".CommOk := TRUE;
-    "SmartHome_DB".CommError := FALSE;
-END_IF;
-IF #err THEN
-    "SmartHome_DB".CommOk := FALSE;
-    "SmartHome_DB".CommError := TRUE;
-    "SmartHome_DB".CommStatus := #stat;
-END_IF;
+    IF NOT #Enable THEN
+        #state := 0;
+        #req := FALSE;
+    END_IF;
 
-"SmartHome_DB".Temp := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[0])) / 10.0;
-"SmartHome_DB".Humidity := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[1])) / 10.0;
-"SmartHome_DB".Soil := WORD_TO_INT("SmartHome_DB".RxRegs[2]);
-"SmartHome_DB".Light := WORD_TO_INT("SmartHome_DB".RxRegs[3]);
-"SmartHome_DB".Water := WORD_TO_INT("SmartHome_DB".RxRegs[4]);
-"SmartHome_DB".Steam := WORD_TO_INT("SmartHome_DB".RxRegs[5]);
-"SmartHome_DB".EspHeartbeat := "SmartHome_DB".RxRegs[9];
+    CASE #state OF
+        0: IF #Enable THEN #state := 1; END_IF;
+        1: #req := TRUE;  #state := 2;
+        2: IF #done OR #err THEN #req := FALSE; #state := 3; END_IF;
+        3: #state := 4;
+        4: #req := TRUE;  #state := 5;
+        5: IF #done OR #err THEN #req := FALSE; #state := 6; END_IF;
+        6: #state := 1;
+        ELSE #state := 0;
+    END_CASE;
+
+    IF #done THEN
+        "SmartHome_DB".CommOk := TRUE;
+        "SmartHome_DB".CommError := FALSE;
+    END_IF;
+    IF #err THEN
+        "SmartHome_DB".CommOk := FALSE;
+        "SmartHome_DB".CommError := TRUE;
+        "SmartHome_DB".CommStatus := #stat;
+    END_IF;
+
+    "SmartHome_DB".Temp := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[0])) / 10.0;
+    "SmartHome_DB".Humidity := INT_TO_REAL(WORD_TO_INT("SmartHome_DB".RxRegs[1])) / 10.0;
+    "SmartHome_DB".Soil := WORD_TO_INT("SmartHome_DB".RxRegs[2]);
+    "SmartHome_DB".Light := WORD_TO_INT("SmartHome_DB".RxRegs[3]);
+    "SmartHome_DB".Water := WORD_TO_INT("SmartHome_DB".RxRegs[4]);
+    "SmartHome_DB".Steam := WORD_TO_INT("SmartHome_DB".RxRegs[5]);
+    "SmartHome_DB".EspHeartbeat := "SmartHome_DB".RxRegs[9];
+END_FUNCTION_BLOCK
